@@ -1,0 +1,44 @@
+# 这是一条轨迹一个hdf5文件的配置示例
+mode: single_episode
+# 轨迹数据文件路径
+dataset_path: toolkits/visualizer/test_example/single_traj_h5
+# 如果需要保存可视化输出，则指定输出目录，否则设为none
+output_dir: none
+
+# 数据集的采集帧率
+fps: 30
+
+# 图像配置
+vision_sensor:
+  # 一般都是rgb
+  type: rgb # rgb / depth / pointcloud
+  # 后面支持通过timestamp来对齐多传感器数据，现在所有数据都按下标对齐
+  timestamp: none
+  # 数据在hdf5文件中的前缀路径
+  prefix: observations/images
+  # 需要读取的图像key列表
+  key: ["head", "left_wrist", "right_wrist"]
+  height: none
+  width: none
+
+# 后面读入轨迹数据时，通过key来判断是否保存该数据
+tactile_sensor:
+  type: tactile
+  timestamp: none
+  prefix: none
+  key: none
+  channels: none
+
+# 关节位置传感器配置
+proprioception_sensor:
+  type: proprioception
+  timestamp: none
+  prefix: observations
+  key: ["qpos"]
+
+
+action:
+  type: joint_position # joint_position / joint_velocity / end_effector_pose
+  timestamp: none
+  prefix: none
+  key: ["action"]
