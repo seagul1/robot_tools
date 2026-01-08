@@ -124,7 +124,12 @@ class H5IncrementalWriter:
 
         # actions
         self.ds_action = self.file.create_dataset('action', shape=(0,7), maxshape=(None,7), dtype=np.float64, chunks=(1024,7))
-        self.ds_action.attrs['unit'] = 'application-defined'
+        # action is stored as absolute joint angles (6) + gripper (1)
+        # By design `action[t]` == joints[t-1] + gripper[t-1]. For the first sample
+        # where no previous exists we store the initial joints+gripper (i.e. a zero-lag
+        # fallback). Downstream consumers should account for this 1-step lag.
+        self.ds_action.attrs['unit'] = 'radian + normalized (gripper)'
+        self.ds_action.attrs['note'] = 'action[t] = joints[t-1] (6) concatenated with gripper[t-1] (1). first action==initial joints+gripper'
 
         # camera metadata (store per-camera intrinsics under meta/camera_intrinsics/<cam>)
         meta = self.file.create_group('meta')
@@ -141,8 +146,16 @@ class H5IncrementalWriter:
 
         # track current length (common proprio length)
         self.length = 0
+        # pending action index: when we append a sample at index n we don't yet
+        # know the next-step joints (which define action[n]). We append a placeholder
+        # and remember the index here; on the next append we fill that index with
+        # the newly observed joints+gripper. On close we fill the final pending
+        # action with the last observed joints+gripper as a fallback.
+        self._pending_action_index = None
+        self._last_joints = None
+        self._last_gripper = None
 
-    def append(self, colors: dict, depths: dict, cam_timestamps: dict, timestamp, joints, joint_timestamp, eef, gripper, action):
+    def append(self, colors: dict, depths: dict, cam_timestamps: dict, timestamp, joints, joint_timestamp, eef, gripper):
         """Append a sample.
 
         colors, depths, cam_timestamps are dicts keyed by cam name (e.g., 'head','right','left').
@@ -181,14 +194,49 @@ class H5IncrementalWriter:
         # gripper
         self.ds_gripper.resize((n+1,))
         self.ds_gripper[n] = gripper
-        # action
-        self.ds_action.resize((n+1,7))
-        self.ds_action[n] = action
+
+        # action: the dataset stores absolute joint+gripper values such that
+        # joints[t+1] == action[t]. Therefore when appending sample at index n
+        # we fill the previously pending action (index n-1) with the current
+        # joints+gripper, then append a placeholder for action[n] and mark it
+        # pending. On close(), the final pending action is filled with the
+        # last observed joints+gripper as a fallback.
+
+        # Prepare current joints+gripper value
+        current_act = np.concatenate([np.asarray(joints, dtype=np.float64).reshape(6,), np.asarray([gripper], dtype=np.float64)])
+
+        # if there is a pending action index (from previous append), fill it
+        if self._pending_action_index is not None:
+            idx = self._pending_action_index
+            # ensure dataset big enough
+            if self.ds_action.shape[0] <= idx:
+                self.ds_action.resize((idx+1, 7))
+            self.ds_action[idx] = current_act
+
+        # append placeholder for current action (will be filled on next append)
+        self.ds_action.resize((n+1, 7))
+        # initialize placeholder with zeros
+        self.ds_action[n] = np.zeros((7,), dtype=np.float64)
+        # mark this index as pending to be filled by the next observed joints
+        self._pending_action_index = n
+
+        # remember last observed joints/gripper for possible fill on close()
+        self._last_joints = np.asarray(joints, dtype=np.float64).reshape(6,)
+        self._last_gripper = float(gripper)
 
         self.length += 1
 
     def close(self):
         try:
+            # finalize pending action: if there is a pending index, fill it with
+            # the last observed joints+gripper as a fallback
+            if self._pending_action_index is not None and self._last_joints is not None:
+                idx = self._pending_action_index
+                if self.ds_action.shape[0] <= idx:
+                    self.ds_action.resize((idx+1, 7))
+                fill_val = np.concatenate([self._last_joints, np.asarray([self._last_gripper], dtype=np.float64)])
+                self.ds_action[idx] = fill_val
+
             self.file.flush()
             self.file.close()
         except Exception:
@@ -356,10 +404,8 @@ def run_collector(args: argparse.Namespace):
                 joints_arr = np.asarray(joints, dtype=np.float64)
                 eef_arr = np.asarray(eef, dtype=np.float64)
                 grip = float(gripper)
-                action = np.zeros(7, dtype=np.float64)
-
                 try:
-                    writer.append(colors, depths, cam_ts, ts, joints_arr, float(joint_ts), eef_arr, grip, action)
+                    writer.append(colors, depths, cam_ts, ts, joints_arr, float(joint_ts), eef_arr, grip)
                 except Exception:
                     # fallback: ignore append errors and continue
                     pass
