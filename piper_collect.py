@@ -50,9 +50,9 @@ class H5IncrementalWriter:
         self.out_path = out_path
         self.traj_name = traj_name
         self.file = h5py.File(out_path, 'w')
-        self.group = self.file.create_group(traj_name)
+        # self.group = self.file.create_group(traj_name)
 
-        obs = self.group.create_group('observation')
+        obs = self.file.create_group('observation')
         imgs = obs.create_group('images')
 
         # determine enabled cameras
@@ -105,8 +105,8 @@ class H5IncrementalWriter:
 
         # proprioception datasets
         proprio = obs.create_group('proprioception')
-        self.ds_timestamp = proprio.create_dataset('timestamp', shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(1024,))
-        self.ds_timestamp.attrs['unit'] = 'seconds'
+        # self.ds_timestamp = proprio.create_dataset('timestamp', shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(1024,))
+        # self.ds_timestamp.attrs['unit'] = 'seconds'
 
         # joint timestamp (robot-provided timestamp for joint state)
         self.ds_joint_timestamp = proprio.create_dataset('joint_timestamp', shape=(0,), maxshape=(None,), dtype=np.float64, chunks=(1024,))
@@ -123,11 +123,11 @@ class H5IncrementalWriter:
         self.ds_gripper.attrs['unit'] = 'normalized (0-1)'
 
         # actions
-        self.ds_action = self.group.create_dataset('action', shape=(0,7), maxshape=(None,7), dtype=np.float64, chunks=(1024,7))
+        self.ds_action = self.file.create_dataset('action', shape=(0,7), maxshape=(None,7), dtype=np.float64, chunks=(1024,7))
         self.ds_action.attrs['unit'] = 'application-defined'
 
         # camera metadata (store per-camera intrinsics under meta/camera_intrinsics/<cam>)
-        meta = self.group.create_group('meta')
+        meta = self.file.create_group('meta')
         cammeta = meta.create_group('camera_intrinsics')
         if camera_info is not None:
             for k, v in camera_info.items():
@@ -137,7 +137,7 @@ class H5IncrementalWriter:
 
         if attrs:
             for k, v in attrs.items():
-                self.group.attrs[k] = v
+                self.file.attrs[k] = v
 
         # track current length (common proprio length)
         self.length = 0
@@ -165,9 +165,9 @@ class H5IncrementalWriter:
             ts_cam = cam_timestamps.get(cam, float(timestamp))
             ds['timestamp'][n] = ts_cam
 
-        # proprio (common)
-        self.ds_timestamp.resize((n+1,))
-        self.ds_timestamp[n] = timestamp
+        # # proprio (common)
+        # self.ds_timestamp.resize((n+1,))
+        # self.ds_timestamp[n] = timestamp
 
         # joint timestamp (robot-provided)
         self.ds_joint_timestamp.resize((n+1,))
@@ -195,7 +195,11 @@ class H5IncrementalWriter:
             pass
 
 
-def run_collector(outdir: str, img_size: int=224, sample_dt: float=0.05):
+def run_collector(args: argparse.Namespace):
+    outdir = args.outdir
+    img_size = args.img_size
+    sample_dt = args.sample_dt
+
     ensure_outdir(outdir)
 
     print('Starting Piper interface...')
@@ -207,7 +211,11 @@ def run_collector(outdir: str, img_size: int=224, sample_dt: float=0.05):
         pass
 
     print('Starting camera(s)...')
-    cam = MultiRealSense(use_front_cam=True, use_right_cam=False, use_left_cam=False, img_size=img_size, front_num_points=2048)
+    cam = MultiRealSense(use_head1_cam=True,
+                         use_head2_cam=getattr(args, 'use_head2_cam', False),
+                         use_right_cam=getattr(args, 'use_right_cam', False),
+                         use_left_cam=getattr(args, 'use_left_cam', False),
+                         img_size=img_size)
     time.sleep(0.2)
 
     recording = False
@@ -379,13 +387,17 @@ def run_collector(outdir: str, img_size: int=224, sample_dt: float=0.05):
 
 
 def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument('--outdir', '-o', default='data', help='Directory to save trajectories')
-    p.add_argument('--img_size', type=int, default=224)
-    p.add_argument('--sample_dt', type=float, default=0.05, help='Sampling interval in seconds')
-    return p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--outdir', '-o', default='data', help='Directory to save trajectories')
+    parser.add_argument('--img_size', type=int, default=None, help='Image size (square) to collect')
+    # 增加外部传入参数，用于控制启用多少摄像头
+    parser.add_argument('--use_head2_cam', action='store_true', help='Whether to use head 2 camera')
+    parser.add_argument('--use_right_cam', action='store_true', help='Whether to use right camera')
+    parser.add_argument('--use_left_cam', action='store_true', help='Whether to use left camera')
+    parser.add_argument('--sample_dt', type=float, default=0.05, help='Sampling interval in seconds')
+    return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
-    run_collector(args.outdir, img_size=args.img_size, sample_dt=args.sample_dt)
+    run_collector(args)

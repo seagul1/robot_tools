@@ -9,8 +9,8 @@ import time
 import multiprocessing
 if not multiprocessing.get_start_method(allow_none=True):
     multiprocessing.set_start_method('spawn')
-import torch
-import pytorch3d.ops as torch3d_ops
+# import torch
+# import pytorch3d.ops as torch3d_ops
 
 np.printoptions(3, suppress=True)
 
@@ -304,10 +304,11 @@ class SingleVisionProcess(Process):
 
     
 class MultiRealSense(object):
-    def __init__(self, use_front_cam=True, use_right_cam=False, use_left_cam=False,
-                 front_cam_idx=0, right_cam_idx=1, left_cam_idx=2,
-                 front_num_points=4096, right_num_points=1024, left_num_points=1024,
-                 front_z_far=1.0, front_z_near=0.1,
+    def __init__(self, 
+                 use_head1_cam=True, use_head2_cam=False, use_right_cam=False, use_left_cam=False,
+                 head1_cam_idx=0, head2_cam_idx=1, right_cam_idx=2, left_cam_idx=3,
+                 head_num_points=4096, right_num_points=1024, left_num_points=1024,
+                 head_z_far=1.0, head_z_near=0.1,
                  right_z_far=0.5, right_z_near=0.01,
                  left_z_far=0.5, left_z_near=0.01,
                  use_grid_sampling=True,
@@ -316,7 +317,8 @@ class MultiRealSense(object):
 
         self.devices = get_realsense_id()
     
-        self.front_queue = Queue(maxsize=3)
+        self.head1_queue = Queue(maxsize=3)
+        self.head2_queue = Queue(maxsize=3)
         self.right_queue = Queue(maxsize=3)
         self.left_queue = Queue(maxsize=3)
 
@@ -325,14 +327,21 @@ class MultiRealSense(object):
 
         # sync_mode: Use 1 for master, 2 for slave, 0 for default (no sync)
 
-        if use_front_cam:
-            self.front_process = SingleVisionProcess(self.devices[front_cam_idx], self.front_queue,
+        if use_head1_cam:
+            self.head1_process = SingleVisionProcess(self.devices[head1_cam_idx], self.head1_queue,
                             enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=1,
-                            num_points=front_num_points, z_far=front_z_far, z_near=front_z_near, 
+                            num_points=head_num_points, z_far=head_z_far, z_near=head_z_near, 
                             use_grid_sampling=use_grid_sampling,  resize=resize, img_size=img_size)
+            
+        if use_head2_cam:
+            self.head2_process = SingleVisionProcess(self.devices[head2_cam_idx], self.head2_queue,
+                    enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=2,
+                        num_points=head_num_points, z_far=head_z_far, z_near=head_z_near, 
+                        use_grid_sampling=use_grid_sampling, resize=resize, img_size=img_size)
+            
         if use_right_cam:
             self.right_process = SingleVisionProcess(self.devices[right_cam_idx], self.right_queue,
-                    enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=1,
+                    enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=2,
                         num_points=right_num_points, z_far=right_z_far, z_near=right_z_near, 
                         use_grid_sampling=use_grid_sampling, resize=resize,  img_size=img_size)
             
@@ -343,9 +352,13 @@ class MultiRealSense(object):
                         use_grid_sampling=use_grid_sampling, resize=resize, img_size=img_size)
 
 
-        if use_front_cam:
-            self.front_process.start()
-            print("front camera start.")
+        if use_head1_cam:
+            self.head1_process.start()
+            print("head_1 camera start.")
+
+        if use_head2_cam:
+            self.head2_process.start()
+            print("head_2 camera start.")
 
         if use_right_cam:
             self.right_process.start()
@@ -357,15 +370,18 @@ class MultiRealSense(object):
 
         
 
-        self.use_front_cam = use_front_cam
+        self.use_head1_cam = use_head1_cam
+        self.use_head2_cam = use_head2_cam
         self.use_right_cam = use_right_cam
         self.use_left_cam = use_left_cam
         
     @property
     def camera_info(self):
         info_dict = {}
-        if self.use_front_cam:
-            info_dict['head_camera_info'] = self.front_process.camera_info
+        if self.use_head1_cam:
+            info_dict['head1_camera_info'] = self.head1_process.camera_info
+        if self.use_head2_cam:
+            info_dict['head2_camera_info'] = self.head2_process.camera_info
         if self.use_right_cam:
             info_dict['right_camera_info'] = self.right_process.camera_info
         if self.use_left_cam:
@@ -375,8 +391,10 @@ class MultiRealSense(object):
     @property
     def enabled_cams(self):
         cams = []
-        if self.use_front_cam:
-            cams.append('head')
+        if self.use_head1_cam:
+            cams.append('head1')
+        if self.use_head2_cam:
+            cams.append('head2')
         if self.use_right_cam:
             cams.append('right')
         if self.use_left_cam:
@@ -385,10 +403,14 @@ class MultiRealSense(object):
         
     def __call__(self):  
         cam_dict = {}
-        if self.use_front_cam:  
-            front_color, front_depth, front_point_cloud, head_ts = self.front_queue.get()
-            cam_dict.update({'head_color': front_color, 'head_depth': front_depth, 'head_point_cloud':front_point_cloud, "head_timestamp": head_ts})
+        if self.use_head1_cam:  
+            head1_color, head1_depth, head1_point_cloud, head1_ts = self.head1_queue.get()
+            cam_dict.update({'head1_color': head1_color, 'head1_depth': head1_depth, 'head1_point_cloud':head1_point_cloud, "head1_timestamp": head1_ts})
       
+        if self.use_head2_cam:
+            head2_color, head2_depth, head2_point_cloud, head2_ts = self.head2_queue.get()
+            cam_dict.update({'head2_color': head2_color, 'head2_depth': head2_depth, 'head2_point_cloud':head2_point_cloud, "head2_timestamp": head2_ts})
+
         if self.use_right_cam: 
             right_color, right_depth, right_point_cloud, right_ts = self.right_queue.get()
             cam_dict.update({'right_color': right_color, 'right_depth': right_depth, 'right_point_cloud':right_point_cloud, "right_timestamp": right_ts})
@@ -399,8 +421,10 @@ class MultiRealSense(object):
         return cam_dict
 
     def finalize(self):
-        if self.use_front_cam:
-            self.front_process.terminate()
+        if self.use_head1_cam:
+            self.head1_process.terminate()
+        if self.use_head2_cam:
+            self.head2_process.terminate()
         if self.use_right_cam:
             self.right_process.terminate()
         if self.use_left_cam:
