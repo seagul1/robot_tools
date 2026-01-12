@@ -168,8 +168,7 @@ class PiperInterface:
         gripper_state = self.robot.GetArmGripperMsgs()
         gripper_width: int = gripper_state.gripper_state.grippers_angle
         gripper_width = gripper_conversion_r2p(gripper_width)
-        print(f"Gripper width percentage: {gripper_width}")
-
+        # avoid noisy printing in tight loops; callers may log if needed
         return gripper_width
 
     def get_joint_positions(self):
@@ -178,7 +177,7 @@ class PiperInterface:
         """
         joint_feedback = self.robot.GetArmJointMsgs()
         joint_positions = joint_feedback.joint_state
-        joint_timestamp = joint_feedback.timestamp
+        joint_timestamp = joint_feedback.time_stamp
         joint_positions = np.asarray([joint_positions.joint_1, joint_positions.joint_2, joint_positions.joint_3,
                                       joint_positions.joint_4, joint_positions.joint_5, joint_positions.joint_6])
         joint_positions = joint_conversion_r2p(joint_positions)

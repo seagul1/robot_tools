@@ -5,6 +5,7 @@ from collections import deque
 import imageio
 import pyrealsense2 as rs
 from multiprocessing import Process, Pipe, Queue, Event
+from queue import Empty
 import time
 import multiprocessing
 if not multiprocessing.get_start_method(allow_none=True):
@@ -57,9 +58,12 @@ def init_given_realsense(
 
         pipeline.stop()
 
-        # Set the inter-camera sync mode
+        # Set the inter-camera sync mode if supported
         # Use 1 for master, 2 for slave, 0 for default (no sync)
-        depth_sensor.set_option(rs.option.inter_cam_sync_mode, sync_mode)
+        try:
+            depth_sensor.set_option(rs.option.inter_cam_sync_mode, sync_mode)
+        except Exception as e:
+            print(f'Warning: could not set inter_cam_sync_mode for device {device}: {e}')
         
         # set min distance
         # depth_sensor.set_option(rs.option.min_distance, 0.05)
@@ -213,11 +217,16 @@ class SingleVisionProcess(Process):
                     enable_rgb=self.enable_rgb, enable_depth=self.enable_depth,
                     enable_point_cloud=self.enable_pointcloud,
                     sync_mode=self.sync_mode)
-
+        # publish camera intrinsics back to parent via queue (sentinel message)
+        try:
+            self.queue.put(('__camera_info__', self.camera_info))
+        except Exception:
+            pass
+        
         debug = False
         while True:
-            color_frame, depth_frame, point_cloud_frame = self.get_vision()
-            self.queue.put([color_frame, depth_frame, point_cloud_frame])
+            color_frame, depth_frame, point_cloud_frame, timestamp = self.get_vision()
+            self.queue.put([color_frame, depth_frame, point_cloud_frame, timestamp])
             time.sleep(0.05)
 
     def terminate(self) -> None:
@@ -316,76 +325,93 @@ class MultiRealSense(object):
                  img_size=384):
 
         self.devices = get_realsense_id()
-    
+
+        # Pre-initialize usage flags and process placeholders to ensure __del__ is safe
+        n_devs = len(self.devices)
+        self.use_head1_cam = use_head1_cam and (0 <= head1_cam_idx < n_devs)
+        if use_head1_cam and not self.use_head1_cam:
+            print(f'Warning: head1_cam_idx {head1_cam_idx} out of range (found {n_devs} devices). Disabling head1_cam.')
+        self.use_head2_cam = use_head2_cam and (0 <= head2_cam_idx < n_devs)
+        if use_head2_cam and not self.use_head2_cam:
+            print(f'Warning: head2_cam_idx {head2_cam_idx} out of range (found {n_devs} devices). Disabling head2_cam.')
+        self.use_right_cam = use_right_cam and (0 <= right_cam_idx < n_devs)
+        if use_right_cam and not self.use_right_cam:
+            print(f'Warning: right_cam_idx {right_cam_idx} out of range (found {n_devs} devices). Disabling right_cam.')
+        self.use_left_cam = use_left_cam and (0 <= left_cam_idx < n_devs)
+        if use_left_cam and not self.use_left_cam:
+            print(f'Warning: left_cam_idx {left_cam_idx} out of range (found {n_devs} devices). Disabling left_cam.')
+
+        # queues for each potential camera
         self.head1_queue = Queue(maxsize=3)
         self.head2_queue = Queue(maxsize=3)
         self.right_queue = Queue(maxsize=3)
         self.left_queue = Queue(maxsize=3)
+
+        # storage for camera intrinsics reported from child processes
+        self._camera_info = {}
 
       
         # 0: f1380328, 1: f1422212
 
         # sync_mode: Use 1 for master, 2 for slave, 0 for default (no sync)
 
-        if use_head1_cam:
+        if self.use_head1_cam:
             self.head1_process = SingleVisionProcess(self.devices[head1_cam_idx], self.head1_queue,
                             enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=1,
                             num_points=head_num_points, z_far=head_z_far, z_near=head_z_near, 
                             use_grid_sampling=use_grid_sampling,  resize=resize, img_size=img_size)
             
-        if use_head2_cam:
+        if self.use_head2_cam:
             self.head2_process = SingleVisionProcess(self.devices[head2_cam_idx], self.head2_queue,
                     enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=2,
                         num_points=head_num_points, z_far=head_z_far, z_near=head_z_near, 
                         use_grid_sampling=use_grid_sampling, resize=resize, img_size=img_size)
             
-        if use_right_cam:
+        if self.use_right_cam:
             self.right_process = SingleVisionProcess(self.devices[right_cam_idx], self.right_queue,
                     enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=2,
                         num_points=right_num_points, z_far=right_z_far, z_near=right_z_near, 
                         use_grid_sampling=use_grid_sampling, resize=resize,  img_size=img_size)
             
-        if use_left_cam:
+        if self.use_left_cam:
             self.left_process = SingleVisionProcess(self.devices[left_cam_idx], self.left_queue,
                     enable_rgb=True, enable_depth=True, enable_pointcloud=False, sync_mode=2,
                         num_points=left_num_points, z_far=left_z_far, z_near=left_z_near, 
                         use_grid_sampling=use_grid_sampling, resize=resize, img_size=img_size)
 
 
-        if use_head1_cam:
+        if getattr(self, 'head1_process', None) is not None:
             self.head1_process.start()
             print("head_1 camera start.")
 
-        if use_head2_cam:
+        if getattr(self, 'head2_process', None) is not None:
             self.head2_process.start()
             print("head_2 camera start.")
 
-        if use_right_cam:
+        if getattr(self, 'right_process', None) is not None:
             self.right_process.start()
             print("right camera start.")
 
-        if use_left_cam:
+        if getattr(self, 'left_process', None) is not None:
             self.left_process.start()
             print("left camera start.")
 
         
 
-        self.use_head1_cam = use_head1_cam
-        self.use_head2_cam = use_head2_cam
-        self.use_right_cam = use_right_cam
-        self.use_left_cam = use_left_cam
+        # usage flags were set earlier based on available devices
         
     @property
     def camera_info(self):
+        # return any camera_info reported by child processes (populated from queue sentinel messages)
         info_dict = {}
-        if self.use_head1_cam:
-            info_dict['head1_camera_info'] = self.head1_process.camera_info
-        if self.use_head2_cam:
-            info_dict['head2_camera_info'] = self.head2_process.camera_info
-        if self.use_right_cam:
-            info_dict['right_camera_info'] = self.right_process.camera_info
-        if self.use_left_cam:
-            info_dict['left_camera_info'] = self.left_process.camera_info
+        if self.use_head1_cam and 'head1' in self._camera_info:
+            info_dict['head1_camera_info'] = self._camera_info.get('head1')
+        if self.use_head2_cam and 'head2' in self._camera_info:
+            info_dict['head2_camera_info'] = self._camera_info.get('head2')
+        if self.use_right_cam and 'right' in self._camera_info:
+            info_dict['right_camera_info'] = self._camera_info.get('right')
+        if self.use_left_cam and 'left' in self._camera_info:
+            info_dict['left_camera_info'] = self._camera_info.get('left')
         return info_dict
     
     @property
@@ -403,21 +429,39 @@ class MultiRealSense(object):
         
     def __call__(self):  
         cam_dict = {}
-        if self.use_head1_cam:  
-            head1_color, head1_depth, head1_point_cloud, head1_ts = self.head1_queue.get()
-            cam_dict.update({'head1_color': head1_color, 'head1_depth': head1_depth, 'head1_point_cloud':head1_point_cloud, "head1_timestamp": head1_ts})
-      
-        if self.use_head2_cam:
-            head2_color, head2_depth, head2_point_cloud, head2_ts = self.head2_queue.get()
-            cam_dict.update({'head2_color': head2_color, 'head2_depth': head2_depth, 'head2_point_cloud':head2_point_cloud, "head2_timestamp": head2_ts})
+        # helper to read one frame, draining any camera_info sentinel messages first
+        def _read_frame_from_queue(q, name):
+            frame_color = frame_depth = frame_pcd = frame_ts = None
+            try:
+                while True:
+                    item = q.get(timeout=0.5)
+                    # sentinel: ('__camera_info__', camera_info)
+                    if isinstance(item, (list, tuple)) and len(item) == 2 and item[0] == '__camera_info__':
+                        self._camera_info[name] = item[1]
+                        continue
+                    if isinstance(item, (list, tuple)) and len(item) == 4:
+                        frame_color, frame_depth, frame_pcd, frame_ts = item
+                    break
+            except Empty:
+                pass
+            return frame_color, frame_depth, frame_pcd, frame_ts
 
-        if self.use_right_cam: 
-            right_color, right_depth, right_point_cloud, right_ts = self.right_queue.get()
-            cam_dict.update({'right_color': right_color, 'right_depth': right_depth, 'right_point_cloud':right_point_cloud, "right_timestamp": right_ts})
+        if self.use_head1_cam:
+            c, d, p, ts = _read_frame_from_queue(self.head1_queue, 'head1')
+            cam_dict.update({'head1_color': c, 'head1_depth': d, 'head1_point_cloud': p, 'head1_timestamp': ts})
+
+        if self.use_head2_cam:
+            c, d, p, ts = _read_frame_from_queue(self.head2_queue, 'head2')
+            cam_dict.update({'head2_color': c, 'head2_depth': d, 'head2_point_cloud': p, 'head2_timestamp': ts})
+
+        if self.use_right_cam:
+            c, d, p, ts = _read_frame_from_queue(self.right_queue, 'right')
+            cam_dict.update({'right_color': c, 'right_depth': d, 'right_point_cloud': p, 'right_timestamp': ts})
 
         if self.use_left_cam:
-            left_color, left_depth, left_point_cloud, left_ts = self.left_queue.get()
-            cam_dict.update({'left_color': left_color, 'left_depth': left_depth, 'left_point_cloud':left_point_cloud, "left_timestamp": left_ts})
+            c, d, p, ts = _read_frame_from_queue(self.left_queue, 'left')
+            cam_dict.update({'left_color': c, 'left_depth': d, 'left_point_cloud': p, 'left_timestamp': ts})
+
         return cam_dict
 
     def finalize(self):
