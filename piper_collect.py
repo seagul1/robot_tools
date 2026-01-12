@@ -35,6 +35,7 @@ import logging
 
 from deployment.Robot.Piper.PiperRobot import PiperInterface
 from deployment.Camera.rs_camera import MultiRealSense
+from timestamp_monitor import TimestampMonitor
 
 # configure logging: INFO by default, DEBUG for verbose
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
@@ -507,6 +508,7 @@ def run_collector(args: argparse.Namespace):
     collected = None
     traj_idx = 1
     writer = None
+    monitor = None  # timestamp synchronization monitor
 
     window_name = 'Piper Collect - press SPACE to start/stop, q to quit'
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -623,6 +625,9 @@ def run_collector(args: argparse.Namespace):
                         enabled = None
 
                     writer = H5IncrementalWriter(out_path, traj_name, img_shape=(img_size, img_size, 3), depth_shape=(img_size, img_size), camera_info=caminfo, enabled_cams=enabled, attrs={'created': time.time()}, camera_extrinsics=camera_extrinsics)
+                    # initialize timestamp monitor for this trajectory
+                    monitor = TimestampMonitor(max_history=300)
+                    logging.info(f'Timestamp monitor initialized for {traj_name}')
                     # force an immediate sample on start
                     last_sample = time.time() - sample_dt
                     # attempt an immediate capture and write one sample so trajectory isn't empty
@@ -694,8 +699,12 @@ def run_collector(args: argparse.Namespace):
                         pass
 
                     logging.info(f'Saved {out_path}  (frames={frames})')
-
-            # sampling while recording
+                    # print final sync report before resetting monitor
+                    if monitor is not None:
+                        logging.info(f'Final timestamp sync report for {traj_name}:')
+                        monitor.report(prefix="[FINAL] ")
+                    # reset monitor after trajectory
+                    monitor = None
             now = time.time()
             if recording and (now - last_sample >= sample_dt):
                 last_sample = now
@@ -730,6 +739,22 @@ def run_collector(args: argparse.Namespace):
                     logging.debug('cams: %s', list(colors.keys()))
                     logging.debug('joints: %s', np.array2string(joints_arr, precision=6))
                     writer.append(colors, depths, cam_ts, ts, joints_arr, float(joint_ts), eef_arr, grip)
+                    
+                    # add to timestamp monitor for synchronization analysis
+                    if monitor is not None:
+                        try:
+                            monitor.add_sample(cam_ts, float(joint_ts), writer.length - 1)
+                        except Exception as e:
+                            logging.debug(f'Error adding sample to monitor: {e}')
+                    
+                    # periodic timestamp sync report (every 100 frames)
+                    if monitor is not None and writer.length % 100 == 0:
+                        monitor.report(prefix="[SYNC] ")
+                        warnings = monitor.check_sync_quality(max_offset_ms=100.0, max_jitter=0.2)
+                        if warnings:
+                            for w in warnings:
+                                logging.warning(f'Sync warning: {w}')
+                
                 except Exception:
                     logging.exception('Error appending sampled frame:')
 
