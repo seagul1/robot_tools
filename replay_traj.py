@@ -12,7 +12,7 @@ ACTION_TYPE_TO_HDF5_KEY = {
 }
 
 FALLBACK_KEY = {
-    "joint_abs": "observation/proprioception/joint",
+    "joint_abs": "observation/proprioception/joints",
     "eef_abs":   "observation/proprioception/eef",
 }
 
@@ -48,8 +48,16 @@ def replay_hdf5_trajectory(
     print("=" * 70)
 
     with h5py.File(hdf5_path, "r") as f:
-        assert traj_name in f, f"Trajectory '{traj_name}' not found"
-        traj = f[traj_name]
+        # assert traj_name in f, f"Trajectory '{traj_name}' not found"
+        # 修改开始：增加根目录回退逻辑
+        if traj_name in f:
+            traj = f[traj_name]
+        else:
+            print(f"[WARN] Trajectory group '{traj_name}' not found in HDF5.")
+            print(f"[WARN] Assuming data is located at the file root (created by piper_collect.py).")
+            traj = f
+        # 修改结束
+        # traj = f[traj_name]
 
         # ======================================================
         # Load trajectory according to action_type
@@ -62,9 +70,26 @@ def replay_hdf5_trajectory(
             print(f"[INFO] Use {primary_key}")
 
         elif action_type in FALLBACK_KEY and FALLBACK_KEY[action_type] in traj:
-            traj_data = np.array(traj[FALLBACK_KEY[action_type]])
-            print(f"[WARN] {primary_key} not found, "
-                  f"fallback to {FALLBACK_KEY[action_type]}")
+            # 读取 6维关节数据
+            joints_data = np.array(traj[FALLBACK_KEY[action_type]])
+            # 尝试读取夹爪数据并拼接
+            if 'observation/proprioception/gripper' in traj:
+                gripper_data = np.array(traj['observation/proprioception/gripper'])
+                
+                # 确保 gripper 是 (N, 1) 的形状
+                if gripper_data.ndim == 1:
+                    gripper_data = gripper_data[:, np.newaxis]
+                
+                # 拼接成 (N, 7)
+                traj_data = np.hstack([joints_data, gripper_data])
+                print(f"[WARN] {primary_key} not found, fallback to {FALLBACK_KEY[action_type]} + gripper")
+            else:
+                #如果没有夹爪数据，就只能抛出异常或者暂时填充0
+                print(f"[WARN] joints found but no gripper data found. Cannot form 7-dim action.")
+                traj_data = joints_data
+            # traj_data = np.array(traj[FALLBACK_KEY[action_type]])
+            # print(f"[WARN] {primary_key} not found, "
+            #       f"fallback to {FALLBACK_KEY[action_type]}")
 
         else:
             raise KeyError(
@@ -82,23 +107,39 @@ def replay_hdf5_trajectory(
     T = traj_data.shape[0]
     print(f"[Replay] Trajectory length: {T}")
 
+    # 修改开始：将脚本的 action_type 转换为 robot 接口支持的字符串
+    robot_action_type = "joint" if "joint" in action_type else "eef"
+    # 修改结束
+
     # ======================================================
     # Move to initial pose (only for abs)
     # ======================================================
     if action_type.endswith("_abs"):
         print("[Replay] Move to initial absolute pose")
-        robot.update_command(traj_data[0], action_type)
+        # robot.update_command(traj_data[0], action_type)
+        robot.update_command(traj_data[0], robot_action_type)
         time.sleep(init_wait)
 
     # ======================================================
     # Replay loop
     # ======================================================
     print("[Replay] Start replay")
+
+    # --- 调试代码开始 ---
+    # 计算整个轨迹的变化幅度（最大值 - 最小值），看看是否有运动
+    diff = np.max(traj_data, axis=0) - np.min(traj_data, axis=0)
+    print(f"[Debug] Range of motion (Max-Min) for each joint + gripper: \n{diff}")
+    
+    if np.all(diff < 0.01):
+        print("[Debug] WARNING: The trajectory data seems almost static! Did you move the robot during recording?")
+    # --- 调试代码结束 ---
+
     for t in range(T):
         action = traj_data[t]
-        print(f"[Step {t:04d}] {action}")
-
-        robot.update_command(action, action_type)
+        # print(f"[Step {t:04d}] {action}")
+        # 修改：使用 robot_action_type
+        robot.update_command(action, robot_action_type)
+        # robot.update_command(action, action_type)
         time.sleep(sleep_dt)
 
     print("[Replay] Finished")
@@ -113,7 +154,7 @@ if __name__ == "__main__":
 
     robot = PiperInterface()
 
-    hdf5_path = "/home/liu/data/traj_001.hdf5"
+    hdf5_path = "/home/zmy/Project/robot_tools/data/traj_1768215712.h5"
 
     # =========================
     # 用户自由指定 action_type
